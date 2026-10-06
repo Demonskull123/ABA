@@ -1,0 +1,2124 @@
+local AirflowSrc = "https://raw.githubusercontent.com/PookiePepelsss/Airflow-UI/refs/heads/main/Source.luau"
+
+local Airflow, loadErr
+local ok, res = pcall(function() return loadstring(game:HttpGet(AirflowSrc))() end)
+if ok and type(res) == "table" and res.CreateWindow then Airflow = res end
+if not Airflow then
+	game:GetService("StarterGui"):SetCore("SendNotification", {
+		Title = "outlaw.dev", Text = "Airflow failed: " .. tostring(res), Duration = 10
+	})
+	return
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Debris = game:GetService("Debris")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local LP = Players.LocalPlayer
+
+local ABOn = false
+local abRange = 25
+local abHold = 0.20
+local hooked = {}
+local hookDummies = true
+local hookPlayers = true
+local pingComp = true
+local pingCompMs = 50
+
+local tradeOn = false
+local tradeDelay = 0.04
+local trading = false
+local tradedThisBlock = false
+local tradeStartTime = 0
+local blockEndTimer = nil
+
+local headRideOn = false
+local headRideTarget = nil
+local headRideConn = nil
+local headRideOffset = 3
+local headRideDuration = 1.5
+local headRideEndTime = 0
+local headRideAlpha = 0.35
+local headRidePending = false
+local myAnimConn = nil
+
+local farmOn = false
+local farmPosMode = "On Top"
+local farmRange = 30
+local farmAttackDelay = 0.08
+local farmSkillDelay = 0.4
+local farmSkillRotation = {"1", "2", "3", "4"}
+local farmRotationIndex = 1
+local farmTeamCheck = true
+local farmTarget = nil
+local farmConn = nil
+local farmM1Loop = nil
+local farmSkillLoop = nil
+
+local nanamiOn = false
+local nanamiTol = 0.005
+local nanamiFired = false
+local nanamiConn = nil
+
+local yujiOn = false
+local yujiMode = "Virtual Attack"
+local fovThreshold = 43.3
+local fovEnter = 40
+local fovReset = 50
+local fovChanged = false
+local fovFired = false
+local yujiConn = nil
+local yujiKey = Enum.KeyCode.Two
+local yujiDelay = 0.6
+local yujiKeyConn = nil
+
+local speedOn = false
+local speedVal = 64
+local speedConn = nil
+local flyOn = false
+local flyVal = 100
+local flyBV = nil
+local flyConn = nil
+local infJumpOn = false
+local infJumpPower = 50
+local infJumpConn = nil
+
+local lockOn = false
+local lockRange = 50
+local lockConn = nil
+local forcedLock = nil
+
+local autoRejoin = false
+local rejoinConn = nil
+
+local recorderOn = false
+local recorderLog = {}
+local recorderConns = {}
+local recorderHooked = {}
+local recorderWatcher = nil
+local recorderSkipMove = true
+local recorderSkipIds = {
+	["rbxassetid://507766666"] = true,
+	["rbxassetid://507766951"] = true,
+	["rbxassetid://507766388"] = true,
+	["rbxassetid://507777826"] = true,
+	["rbxassetid://507767714"] = true,
+	["rbxassetid://507784897"] = true,
+	["rbxassetid://507785072"] = true,
+	["rbxassetid://507797819"] = true,
+	["rbxassetid://507797826"] = true,
+}
+
+local previewRig = nil
+local previewHum = nil
+local previewTrack = nil
+local previewFrame = nil
+local previewLabel = nil
+
+local atkIds = {
+	["rbxassetid://1461128166"] = true,
+	["rbxassetid://1461128859"] = true,
+	["rbxassetid://1461136273"] = true,
+	["rbxassetid://1461136875"] = true,
+	["rbxassetid://112361413535373"] = true,
+	["rbxassetid://1461252313"] = true,
+	["rbxassetid://1470447472"] = true,
+	["rbxassetid://1470449816"] = true,
+	["rbxassetid://1470439852"] = true,
+	["rbxassetid://1470422387"] = true,
+	["rbxassetid://6310220913"] = true,
+}
+
+local comboEndIds = {
+	["rbxassetid://1461145506"] = true,
+	["rbxassetid://1461137417"] = true,
+}
+
+local headRideAnimId = "rbxassetid://1461137417"
+
+local function getInput()
+	local bp = LP:FindFirstChild("Backpack")
+	if bp then
+		local inp = bp:FindFirstChild("Input")
+		if inp and inp:IsA("RemoteEvent") then return inp end
+	end
+	local char = LP.Character
+	if char then
+		local traits = char:FindFirstChild("ServerTraits")
+		if traits then
+			local inp = traits:FindFirstChild("Input")
+			if inp and inp:IsA("RemoteEvent") then return inp end
+		end
+	end
+	local bpTraits = bp and bp:FindFirstChild("ServerTraits")
+	if bpTraits then
+		local inp = bpTraits:FindFirstChild("Input")
+		if inp and inp:IsA("RemoteEvent") then return inp end
+	end
+	for _, v in ipairs(LP:GetDescendants()) do
+		if v:IsA("RemoteEvent") and v.Name == "Input" then
+			return v
+		end
+	end
+	return nil
+end
+
+local function isSameTeam(model)
+	if not farmTeamCheck then return false end
+	if not LP.Team then return false end
+	local theirPlr = Players:GetPlayerFromCharacter(model)
+	if not theirPlr then return false end
+	if not theirPlr.Team then return false end
+	return theirPlr.Team == LP.Team
+end
+
+local function nearestTarget()
+	local myChar = LP.Character
+	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+	if not myRoot then return nil end
+	local best, bestD = nil, math.huge
+	for hum in pairs(hooked) do
+		local model = hum.Parent
+		if model and model.Parent and model ~= myChar and not isSameTeam(model) then
+			local root = model:FindFirstChild("HumanoidRootPart")
+			if root then
+				local d = (myRoot.Position - root.Position).Magnitude
+				if d < bestD then best, bestD = root, d end
+			end
+		end
+	end
+	return best
+end
+
+local function virtualClick()
+	VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+	task.wait(0.02)
+	VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+end
+
+local function fireM1()
+	local input = getInput()
+	if not input then return end
+
+	local char = LP.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local cam = workspace.CurrentCamera
+	local target = nearestTarget()
+
+	local hitPos, lookDir
+	if target then
+		hitPos = target.Position
+		lookDir = (target.Position - (root and root.Position or cam.CFrame.Position))
+		if lookDir.Magnitude > 0 then lookDir = lookDir.Unit else lookDir = cam.CFrame.LookVector end
+	elseif cam then
+		local origin = root and root.Position or cam.CFrame.Position
+		lookDir = cam.CFrame.LookVector
+		hitPos = origin + lookDir * 10
+	else
+		hitPos = root and (root.Position + root.CFrame.LookVector * 10) or Vector3.new()
+		lookDir = root and root.CFrame.LookVector or Vector3.new(0, 0, -1)
+	end
+
+	local mouseHit = CFrame.new(hitPos, hitPos + lookDir)
+
+	local down = {
+		[1] = "M1",
+		[2] = {
+			air = false,
+			md = Vector3.new(0, 0, 0),
+			mousehit = mouseHit,
+			skeydown = true,
+			skeyreal = false
+		},
+		n = 2,
+	}
+
+	local up = {
+		[1] = "M1",
+		[2] = {
+			air = false,
+			md = Vector3.new(0, 0, 0),
+			mousehit = mouseHit,
+			skeydown = false,
+			skeyreal = true
+		},
+		n = 2,
+	}
+
+	pcall(function()
+		input:FireServer(unpack(down, 1, down.n or #down))
+	end)
+	task.wait(0.05)
+	pcall(function()
+		input:FireServer(unpack(up, 1, up.n or #up))
+	end)
+end
+
+local function fireSkillKey(keyName)
+	local kc
+	if keyName == "1" then kc = Enum.KeyCode.One
+	elseif keyName == "2" then kc = Enum.KeyCode.Two
+	elseif keyName == "3" then kc = Enum.KeyCode.Three
+	elseif keyName == "4" then kc = Enum.KeyCode.Four
+	elseif keyName == "5" then kc = Enum.KeyCode.Five
+	else kc = Enum.KeyCode.One end
+
+	pcall(function()
+		VirtualInputManager:SendKeyEvent(true, kc, false, game)
+		task.wait(0.05)
+		VirtualInputManager:SendKeyEvent(false, kc, false, game)
+	end)
+end
+
+local function fireNextFarmSkill()
+	local key = farmSkillRotation[farmRotationIndex]
+	if key then
+		fireSkillKey(key)
+	end
+	farmRotationIndex = farmRotationIndex + 1
+	if farmRotationIndex > #farmSkillRotation then
+		farmRotationIndex = 1
+	end
+end
+
+local function fireSkillRemote()
+	fireSkillKey("2")
+end
+
+local function fireSkillByMode()
+	if yujiMode == "In-Game M1" then
+		fireM1()
+	elseif yujiMode == "Virtual Attack" then
+		virtualClick()
+	elseif yujiMode == "UseMove Remote" then
+		fireSkillRemote()
+	end
+end
+
+function stopHeadRide()
+	headRideTarget = nil
+	headRideEndTime = 0
+	headRidePending = false
+	if headRideConn then
+		pcall(function() headRideConn:Disconnect() end)
+		headRideConn = nil
+	end
+end
+
+local function startHeadRide(hum)
+	if not headRideOn then return end
+	if headRideTarget == hum then return end
+	headRideTarget = hum
+	headRideEndTime = tick() + headRideDuration
+
+	if headRideConn then
+		headRideConn:Disconnect()
+		headRideConn = nil
+	end
+
+	headRideConn = RunService.RenderStepped:Connect(function()
+		if not headRideOn then
+			stopHeadRide()
+			return
+		end
+		if tick() >= headRideEndTime then
+			stopHeadRide()
+			return
+		end
+		local model = hum and hum.Parent
+		if not model or not model.Parent then
+			stopHeadRide()
+			return
+		end
+
+		local myChar = LP.Character
+		if not myChar then
+			stopHeadRide()
+			return
+		end
+		local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+		local theirHead = model:FindFirstChild("Head")
+		if not myRoot or not theirHead then
+			stopHeadRide()
+			return
+		end
+
+		local vel = theirHead.AssemblyLinearVelocity
+		if vel.Y < -60 then
+			stopHeadRide()
+			return
+		end
+
+		local targetCF = theirHead.CFrame * CFrame.new(0, headRideOffset, 0)
+		myRoot.CFrame = myRoot.CFrame:Lerp(targetCF, headRideAlpha)
+		myRoot.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+	end)
+end
+
+local function waitForHitThenRide()
+	if not headRideOn then return end
+	if headRidePending then return end
+	headRidePending = true
+
+	local char = LP.Character
+	if not char then
+		headRidePending = false
+		return
+	end
+	local myRoot = char:FindFirstChild("HumanoidRootPart")
+	if not myRoot then
+		headRidePending = false
+		return
+	end
+
+	local best, bestD = nil, math.huge
+	for h in pairs(hooked) do
+		local model = h.Parent
+		if model and model.Parent and model ~= char then
+			local r = model:FindFirstChild("HumanoidRootPart")
+			if r then
+				local d = (r.Position - myRoot.Position).Magnitude
+				if d < bestD then best, bestD = h, d end
+			end
+		end
+	end
+	if not best then
+		headRidePending = false
+		return
+	end
+
+	local targetModel = best.Parent
+	local startHealth = best.Health
+	local startTags = {}
+	for _, c in ipairs(targetModel:GetChildren()) do
+		startTags[c.Name] = true
+	end
+
+	local conn
+	local startTime = tick()
+	conn = RunService.Heartbeat:Connect(function()
+		if not headRideOn then
+			conn:Disconnect()
+			headRidePending = false
+			return
+		end
+		if tick() - startTime > 0.6 then
+			conn:Disconnect()
+			headRidePending = false
+			return
+		end
+		local hum = targetModel:FindFirstChildOfClass("Humanoid")
+		if not hum then
+			conn:Disconnect()
+			headRidePending = false
+			return
+		end
+		local hit = hum.Health < startHealth
+		if not hit then
+			for _, c in ipairs(targetModel:GetChildren()) do
+				if not startTags[c.Name] then
+					local n = c.Name:lower()
+					if n:find("hit") or n:find("stun") or n:find("slam") or n:find("ragdoll") or n:find("got") then
+						hit = true
+						break
+					end
+				end
+			end
+		end
+		if hit then
+			conn:Disconnect()
+			headRidePending = false
+			startHeadRide(hum)
+		end
+	end)
+end
+
+local function hookMyAnimator()
+	if myAnimConn then
+		pcall(function() myAnimConn:Disconnect() end)
+		myAnimConn = nil
+	end
+
+	local char = LP.Character
+	if not char then return end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if not animator then return end
+
+	myAnimConn = animator.AnimationPlayed:Connect(function(track)
+		if not headRideOn then return end
+		local id = track.Animation and track.Animation.AnimationId
+		if id ~= headRideAnimId then return end
+		waitForHitThenRide()
+	end)
+end
+
+local function blockPulse(duration)
+	local input = getInput()
+	if not input then return end
+
+	if blockEndTimer then
+		pcall(function() blockEndTimer:Cancel() end)
+		blockEndTimer = nil
+	end
+
+	pcall(function() input:FireServer("BlockOn") end)
+
+	blockEndTimer = task.delay(duration, function()
+		local i = getInput()
+		if i then pcall(function() i:FireServer("BlockOff") end) end
+		blockEndTimer = nil
+	end)
+end
+
+local function fireBlock()
+	local holdTime = abHold + (pingComp and (pingCompMs / 1000) or 0)
+	blockPulse(holdTime)
+end
+
+local function doTrade()
+	if not tradeOn then return end
+
+	if trading then
+		if tick() - tradeStartTime > 2 then
+			trading = false
+		else
+			return
+		end
+	end
+
+	if tradedThisBlock then return end
+
+	trading = true
+	tradedThisBlock = true
+	tradeStartTime = tick()
+
+	task.spawn(function()
+		pcall(function()
+			local holdTime = abHold + (pingComp and (pingCompMs / 1000) or 0)
+			task.wait(holdTime + tradeDelay)
+			if tradeOn then
+				fireM1()
+			end
+		end)
+		task.wait(0.6)
+		trading = false
+	end)
+end
+
+local function onAttack()
+	if not ABOn and not tradeOn then return end
+
+	fireBlock()
+	tradedThisBlock = false
+	if tradeOn then doTrade() end
+end
+
+local function farmPositionCFrame(targetRoot)
+	local pos = targetRoot.Position
+	local look = targetRoot.CFrame.LookVector
+
+	if farmPosMode == "On Top" then
+		return CFrame.new(pos + Vector3.new(0, 4, 0))
+	elseif farmPosMode == "Below" then
+		return CFrame.new(pos - Vector3.new(0, 4, 0))
+	elseif farmPosMode == "Behind" then
+		return CFrame.new(pos - look * 4, pos)
+	elseif farmPosMode == "In Front" then
+		return CFrame.new(pos + look * 4, pos)
+	end
+	return CFrame.new(pos)
+end
+
+local function farmLoop()
+	if farmConn then
+		farmConn:Disconnect()
+		farmConn = nil
+	end
+	if farmM1Loop then
+		task.cancel(farmM1Loop)
+		farmM1Loop = nil
+	end
+	if farmSkillLoop then
+		task.cancel(farmSkillLoop)
+		farmSkillLoop = nil
+	end
+
+	farmRotationIndex = 1
+
+	farmConn = RunService.Heartbeat:Connect(function()
+		if not farmOn then
+			if farmConn then
+				farmConn:Disconnect()
+				farmConn = nil
+			end
+			return
+		end
+
+		local char = LP.Character
+		if not char then return end
+		local myRoot = char:FindFirstChild("HumanoidRootPart")
+		if not myRoot then return end
+
+		local best, bestD = nil, farmRange
+		for h in pairs(hooked) do
+			local model = h.Parent
+			if model and model.Parent and model ~= char and not isSameTeam(model) then
+				local r = model:FindFirstChild("HumanoidRootPart")
+				local hum = model:FindFirstChildOfClass("Humanoid")
+				if r and hum and hum.Health > 0 then
+					local d = (r.Position - myRoot.Position).Magnitude
+					if d < bestD then best, bestD = h, d end
+				end
+			end
+		end
+
+		if not best then
+			farmTarget = nil
+			forcedLock = nil
+			return
+		end
+
+		farmTarget = best
+		local model = best.Parent
+		local targetRoot = model:FindFirstChild("HumanoidRootPart")
+		if not targetRoot then return end
+
+		-- force character lock onto the farmed target
+		forcedLock = targetRoot
+
+		myRoot.CFrame = farmPositionCFrame(targetRoot)
+		myRoot.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+	end)
+
+	farmM1Loop = task.spawn(function()
+		while farmOn do
+			if farmTarget and farmTarget.Parent then
+				fireM1()
+				task.wait(farmAttackDelay)
+			else
+				task.wait(0.05)
+			end
+		end
+	end)
+
+	farmSkillLoop = task.spawn(function()
+		while farmOn do
+			if farmTarget and farmTarget.Parent then
+				fireNextFarmSkill()
+			end
+			task.wait(farmSkillDelay)
+		end
+	end)
+end
+
+local function hookHumanoid(hum)
+	if not hum or not hum:IsA("Humanoid") then return end
+	if hooked[hum] then return end
+
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		task.spawn(function()
+			local t = 0
+			while hum.Parent and not animator and t < 5 do
+				task.wait(0.1); t = t + 0.1
+				animator = hum:FindFirstChildOfClass("Animator")
+			end
+			if animator then hookHumanoid(hum) end
+		end)
+		return
+	end
+
+	hooked[hum] = true
+	local model = hum.Parent
+	local conn = animator.AnimationPlayed:Connect(function(track)
+		if not model or not model.Parent then return end
+		local id = track.Animation and track.Animation.AnimationId
+		if not id then return end
+		local myChar = LP.Character
+		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		local theirRoot = model:FindFirstChild("HumanoidRootPart")
+		if not myRoot or not theirRoot then return end
+		if (myRoot.Position - theirRoot.Position).Magnitude > abRange then return end
+
+		if comboEndIds[id] then
+			return
+		end
+
+		if not atkIds[id] then return end
+
+		if not ABOn and not tradeOn then return end
+		onAttack()
+	end)
+
+	local cleanup
+	cleanup = hum.AncestryChanged:Connect(function(_, parent)
+		if not parent then
+			pcall(function() conn:Disconnect() end)
+			pcall(function() cleanup:Disconnect() end)
+			hooked[hum] = nil
+		end
+	end)
+end
+
+local function hookLive()
+	if not hookDummies then return end
+	local live = workspace:FindFirstChild("Live")
+	if not live then return end
+	for _, c in ipairs(live:GetChildren()) do
+		if c:IsA("Model") then
+			local h = c:FindFirstChildOfClass("Humanoid")
+			if h then hookHumanoid(h) end
+		end
+	end
+end
+
+local function hookPlayersFunc()
+	if not hookPlayers then return end
+	local myChar = LP.Character
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LP then
+			local c = plr.Character
+			if c and c ~= myChar then
+				local h = c:FindFirstChildOfClass("Humanoid")
+				if h then hookHumanoid(h) end
+			end
+		end
+	end
+end
+
+local function scanAll()
+	local myChar = LP.Character
+	for _, o in ipairs(workspace:GetDescendants()) do
+		if o:IsA("Humanoid") then
+			local m = o.Parent
+			if not (m and myChar and m == myChar) then
+				hookHumanoid(o)
+			end
+		end
+	end
+end
+
+local abConn1, abConn2, abConn3
+local function startHooks()
+	hookLive(); hookPlayersFunc(); scanAll()
+
+	local live = workspace:FindFirstChild("Live")
+	if live then
+		abConn1 = live.ChildAdded:Connect(function(c)
+			if not ABOn and not tradeOn and not headRideOn and not farmOn then return end
+			if not hookDummies then return end
+			if c:IsA("Model") then
+				local h = c:FindFirstChildOfClass("Humanoid")
+				if h then hookHumanoid(h) end
+			end
+		end)
+	end
+
+	abConn2 = workspace.DescendantAdded:Connect(function(o)
+		if not ABOn and not tradeOn and not headRideOn and not farmOn then return end
+		if o:IsA("Humanoid") then
+			local m = o.Parent
+			local mc = LP.Character
+			if not (m and mc and m == mc) then hookHumanoid(o) end
+		elseif o:IsA("Animator") then
+			local h = o.Parent
+			if h and h:IsA("Humanoid") then hookHumanoid(h) end
+		end
+	end)
+
+	abConn3 = Players.PlayerAdded:Connect(function(plr)
+		plr.CharacterAdded:Connect(function(c)
+			if not ABOn and not tradeOn and not headRideOn and not farmOn then return end
+			if not hookPlayers then return end
+			local h = c:WaitForChild("Humanoid", 5)
+			if h then hookHumanoid(h) end
+		end)
+	end)
+end
+
+local function stopHooks()
+	if abConn1 then abConn1:Disconnect() abConn1 = nil end
+	if abConn2 then abConn2:Disconnect() abConn2 = nil end
+	if abConn3 then abConn3:Disconnect() abConn3 = nil end
+end
+
+local function findBar()
+	local live = workspace:FindFirstChild("Live")
+	if not live then return nil end
+	for _, c in ipairs(live:GetChildren()) do
+		local hrp = c:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local gui = hrp:FindFirstChild("NanamiCutGUI")
+			if gui then
+				local bar = gui:FindFirstChild("MainBar")
+				if bar then
+					local cut = bar:FindFirstChild("Cutter")
+					local goal = bar:FindFirstChild("Goal")
+					if cut and goal then return cut, goal end
+				end
+			end
+		end
+	end
+end
+
+local function nanamiTick()
+	if not nanamiOn then return end
+	if nanamiFired then return end
+	local char = LP.Character
+	if not char then return end
+	if char:GetAttribute("NANAMIAIM") ~= true then return end
+	local cut, goal = findBar()
+	if not cut or not goal then return end
+	local diff = math.abs(cut.Position.X.Scale - goal.Position.X.Scale)
+	if diff <= nanamiTol then
+		virtualClick()
+		nanamiFired = true
+	end
+end
+
+local function bindNanamiChar(c)
+	if not c then return end
+	c:GetAttributeChangedSignal("NANAMIAIM"):Connect(function()
+		nanamiFired = false
+	end)
+end
+
+local function yujiTick()
+	if not yujiOn then return end
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	local fov = cam.FieldOfView
+	if fov < fovEnter then fovChanged = true end
+	if fovChanged and not fovFired and fov >= fovThreshold then
+		fireSkillByMode()
+		fovFired = true
+	end
+	if fov > fovReset then
+		fovChanged = false
+		fovFired = false
+	end
+end
+
+local function hookYujiKey()
+	if yujiKeyConn then
+		pcall(function() yujiKeyConn:Disconnect() end)
+		yujiKeyConn = nil
+	end
+
+	yujiKeyConn = UserInputService.InputBegan:Connect(function(input, gp)
+		if gp then return end
+		if not yujiOn then return end
+		if input.KeyCode ~= yujiKey then return end
+
+		task.spawn(function()
+			task.wait(yujiDelay)
+			if not yujiOn then return end
+			fireSkillByMode()
+		end)
+	end)
+end
+
+local function lockTick()
+	-- forced lock takes priority
+	local target = forcedLock
+	if not target then
+		if not lockOn then return end
+		local myChar = LP.Character
+		if not myChar then return end
+		local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+		if not myRoot then return end
+		local best, bestD = nil, lockRange
+		for h in pairs(hooked) do
+			local model = h.Parent
+			if model and model.Parent and model ~= myChar and not isSameTeam(model) then
+				local r = model:FindFirstChild("HumanoidRootPart")
+				if r then
+					local d = (r.Position - myRoot.Position).Magnitude
+					if d < bestD then best, bestD = r, d end
+				end
+			end
+		end
+		target = best
+	end
+	if not target then return end
+
+	local myChar = LP.Character
+	if not myChar then return end
+	local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+	local hum = myChar:FindFirstChildOfClass("Humanoid")
+	if not myRoot or not hum then return end
+
+	local p = myRoot.Position
+	local t = target.Position
+	if hum.AutoRotate then hum.AutoRotate = false end
+	myRoot.CFrame = CFrame.lookAt(p, Vector3.new(t.X, p.Y, t.Z))
+end
+
+local function nameLooksLikeMovement(name)
+	if not name then return false end
+	local n = name:lower()
+	return n:find("run") or n:find("walk") or n:find("idle") or
+	       n:find("jump") or n:find("fall") or n:find("swim") or
+	       n:find("climb") or n:find("sit")
+end
+
+local function setupPreviewRig()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "outlawPreview"
+	gui.IgnoreGuiInset = true
+	gui.ResetOnSpawn = false
+	gui.Parent = LP:FindFirstChild("PlayerGui") or game:GetService("CoreGui")
+
+	local frame = Instance.new("Frame")
+	frame.Name = "PreviewFrame"
+	frame.Size = UDim2.new(0, 260, 0, 320)
+	frame.Position = UDim2.new(1, -280, 1, -360)
+	frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	frame.BackgroundTransparency = 0.15
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.Parent = gui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = frame
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(1, 0, 0, 24)
+	title.BackgroundTransparency = 1
+	title.Text = "Preview"
+	title.TextColor3 = Color3.fromRGB(255, 255, 255)
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 14
+	title.Parent = frame
+
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.Size = UDim2.new(0, 24, 0, 24)
+	closeBtn.Position = UDim2.new(1, -28, 0, 2)
+	closeBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	closeBtn.Text = "X"
+	closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	closeBtn.Font = Enum.Font.GothamBold
+	closeBtn.TextSize = 12
+	closeBtn.BorderSizePixel = 0
+	closeBtn.Parent = frame
+	closeBtn.MouseButton1Click:Connect(function() frame.Visible = false end)
+
+	local vp = Instance.new("ViewportFrame")
+	vp.Size = UDim2.new(1, -16, 1, -70)
+	vp.Position = UDim2.new(0, 8, 0, 30)
+	vp.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+	vp.BorderSizePixel = 0
+	vp.Parent = frame
+
+	local vpCorner = Instance.new("UICorner")
+	vpCorner.CornerRadius = UDim.new(0, 6)
+	vpCorner.Parent = vp
+
+	local cam = Instance.new("Camera")
+	cam.CFrame = CFrame.new(Vector3.new(0, 3, -7), Vector3.new(0, 2.5, 0))
+	cam.Parent = vp
+	vp.CurrentCamera = cam
+
+	local world = Instance.new("WorldModel")
+	world.Parent = vp
+
+	local clone
+	local char = LP.Character
+	if char then
+		clone = char:Clone()
+		clone.Name = "PreviewRig"
+
+		for _, d in ipairs(clone:GetDescendants()) do
+			if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("Sound") or d:IsA("ParticleEmitter") then
+				d:Destroy()
+			end
+		end
+
+		local root = clone:FindFirstChild("HumanoidRootPart")
+		if root then
+			root.Anchored = true
+		end
+
+		clone.Parent = world
+	end
+
+	local hum = clone and clone:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+		local oldAnim = hum:FindFirstChildOfClass("Animator")
+		if oldAnim then oldAnim:Destroy() end
+		local animator = Instance.new("Animator")
+		animator.Parent = hum
+	end
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, -16, 0, 30)
+	label.Position = UDim2.new(0, 8, 1, -38)
+	label.BackgroundTransparency = 1
+	label.Text = "(no animation)"
+	label.TextColor3 = Color3.fromRGB(200, 200, 200)
+	label.Font = Enum.Font.Gotham
+	label.TextSize = 11
+	label.TextWrapped = true
+	label.Parent = frame
+
+	previewFrame = frame
+	previewLabel = label
+	previewRig = clone
+	previewHum = hum
+end
+
+local function previewAnim(id, modelName)
+	if not previewFrame then return end
+	previewFrame.Visible = true
+
+	if previewTrack then
+		pcall(function() previewTrack:Stop() end)
+		previewTrack = nil
+	end
+
+	if not previewHum then return end
+	local anim = Instance.new("Animation")
+	anim.AnimationId = id
+	local ok2, track = pcall(function() return previewHum:LoadAnimation(anim) end)
+	if ok2 and track then
+		track.Looped = true
+		track:Play()
+		previewTrack = track
+	end
+
+	if previewLabel then
+		previewLabel.Text = (modelName or "?") .. " -> " .. id
+	end
+end
+
+pcall(setupPreviewRig)
+
+local function recorderAttachAnimator(animator)
+	if not animator or recorderHooked[animator] then return end
+	recorderHooked[animator] = true
+
+	local model = animator.Parent and animator.Parent.Parent
+	local conn = animator.AnimationPlayed:Connect(function(track)
+		if not recorderOn then return end
+		local anim = track.Animation
+		if not anim then return end
+		local id = anim.AnimationId
+		if not id or id == "" then return end
+
+		if recorderSkipMove then
+			if recorderSkipIds[id] then return end
+			if nameLooksLikeMovement(anim.Name) then return end
+		end
+
+		local entry = {
+			time = os.clock(),
+			model = model and model.Name or "?",
+			id = id
+		}
+		table.insert(recorderLog, entry)
+
+		if #recorderLog > 500 then
+			table.remove(recorderLog, 1)
+		end
+
+		print(string.format("[Recorder] %s -> %s", entry.model, id))
+	end)
+
+	table.insert(recorderConns, conn)
+end
+
+local function recorderScan()
+	for _, o in ipairs(workspace:GetDescendants()) do
+		if o:IsA("Animator") then
+			recorderAttachAnimator(o)
+		end
+	end
+end
+
+local function recorderStart()
+	if recorderOn then return end
+	recorderOn = true
+
+	recorderScan()
+
+	recorderWatcher = workspace.DescendantAdded:Connect(function(o)
+		if not recorderOn then return end
+		if o:IsA("Animator") then
+			recorderAttachAnimator(o)
+		end
+	end)
+end
+
+local function recorderStop()
+	recorderOn = false
+	if recorderWatcher then
+		recorderWatcher:Disconnect()
+		recorderWatcher = nil
+	end
+	for _, c in ipairs(recorderConns) do
+		pcall(function() c:Disconnect() end)
+	end
+	table.clear(recorderConns)
+	table.clear(recorderHooked)
+end
+
+local function recorderToText()
+	local lines = {}
+	for _, e in ipairs(recorderLog) do
+		table.insert(lines, string.format("%s -> %s", e.model, e.id))
+	end
+	return table.concat(lines, "\n")
+end
+
+local function recorderIdsOnly()
+	local seen = {}
+	local ordered = {}
+	for _, e in ipairs(recorderLog) do
+		if not seen[e.id] then
+			seen[e.id] = true
+			table.insert(ordered, e.id)
+		end
+	end
+
+	local lines = { "local atkIds = {" }
+	for _, id in ipairs(ordered) do
+		table.insert(lines, string.format('\t["%s"] = true,', id))
+	end
+	table.insert(lines, "}")
+
+	return table.concat(lines, "\n")
+end
+
+local function copyText(txt, label)
+	if setclipboard then
+		setclipboard(txt)
+		Airflow:Notify("outlaw.dev", label or "Copied", 2)
+	else
+		print(txt)
+		Airflow:Notify("outlaw.dev", "Printed to F9 (no setclipboard)", 3)
+	end
+end
+
+-- Server hop / rejoin
+local function doRejoin()
+	pcall(function()
+		TeleportService:Teleport(game.PlaceId, LP)
+	end)
+end
+
+local function doServerHop()
+	task.spawn(function()
+		local success, err = pcall(function()
+			local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+			local res = game:HttpGet(url)
+			local data = HttpService:JSONDecode(res)
+			if data and data.data then
+				for _, srv in ipairs(data.data) do
+					if srv.playing and srv.maxPlayers and srv.playing < srv.maxPlayers and srv.id ~= game.JobId then
+						TeleportService:TeleportToPlaceInstance(game.PlaceId, srv.id, LP)
+						return
+					end
+				end
+			end
+			-- fallback
+			TeleportService:Teleport(game.PlaceId, LP)
+		end)
+		if not success then
+			pcall(function()
+				TeleportService:Teleport(game.PlaceId, LP)
+			end)
+		end
+	end)
+end
+
+local function doJoinLowest()
+	task.spawn(function()
+		local success, err = pcall(function()
+			local cursor = ""
+			local bestId = nil
+			local bestCount = math.huge
+			for _ = 1, 3 do
+				local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+				if cursor ~= "" then
+					url = url .. "&cursor=" .. cursor
+				end
+				local res = game:HttpGet(url)
+				local data = HttpService:JSONDecode(res)
+				if data and data.data then
+					for _, srv in ipairs(data.data) do
+						if srv.playing and srv.maxPlayers and srv.playing < srv.maxPlayers and srv.id ~= game.JobId then
+							if srv.playing < bestCount then
+								bestCount = srv.playing
+								bestId = srv.id
+							end
+						end
+					end
+					cursor = data.nextPageCursor or ""
+					if cursor == "" then break end
+				else
+					break
+				end
+			end
+			if bestId then
+				TeleportService:TeleportToPlaceInstance(game.PlaceId, bestId, LP)
+			else
+				TeleportService:Teleport(game.PlaceId, LP)
+			end
+		end)
+		if not success then
+			pcall(function()
+				TeleportService:Teleport(game.PlaceId, LP)
+			end)
+		end
+	end)
+end
+
+local function hookAutoRejoin()
+	if rejoinConn then
+		pcall(function() rejoinConn:Disconnect() end)
+		rejoinConn = nil
+	end
+	if not autoRejoin then return end
+
+	rejoinConn = LP.OnTeleport:Connect(function(state)
+		if state == Enum.TeleportState.Started then
+			task.wait(3)
+			pcall(function()
+				TeleportService:Teleport(game.PlaceId, LP)
+			end)
+		end
+	end)
+end
+
+LP.CharacterAdded:Connect(function()
+	task.wait(1)
+	if headRideOn then
+		hookMyAnimator()
+	end
+	if autoRejoin then
+		task.spawn(function()
+			task.wait(5)
+			pcall(function()
+				TeleportService:Teleport(game.PlaceId, LP)
+			end)
+		end)
+	end
+end)
+
+local Window = Airflow:CreateWindow({
+	Name = "outlaw.dev",
+	LoadingSubtitle = "syncrypt",
+	ToggleUIKeybind = "RightControl",
+	Loading = false,
+	ConfigurationSaving = {Enabled = true, FolderName = "outlaw.dev", FileName = "default"},
+	Home = {Name = "Home", Stats = {"FPS", "Ping", "Executor", "Game", "Region", "Time"}},
+})
+
+local FarmTab = Window:CreateTab("Auto Farm", "bot")
+local BlockTab = Window:CreateTab("Auto Block", "shield")
+local TradeTab = Window:CreateTab("M1 Trade", "sword")
+local HeadRideTab = Window:CreateTab("Auto Head Ride", "crown")
+local NanamiTab = Window:CreateTab("Auto Nanami", "target")
+local YujiTab = Window:CreateTab("Auto Yuji", "flame")
+local RecorderTab = Window:CreateTab("Auto Block Recorder", "radio")
+local PlayerTab = Window:CreateTab("Player", "person-standing")
+local MiscTab = Window:CreateTab("Misc", "settings")
+local SettingsTab = Window:CreateTab("Settings", "settings")
+
+FarmTab:CreateSection("Auto Farm")
+FarmTab:CreateToggle({
+	Name = "Auto Farm Enemies",
+	Description = "M1 spam + skill rotation, auto-faces the enemy, fires all at once",
+	CurrentValue = false,
+	Flag = "FR_On",
+	Callback = function(v)
+		farmOn = v
+		if v then
+			startHooks()
+			if not lockConn then
+				lockConn = RunService.RenderStepped:Connect(lockTick)
+			end
+			farmLoop()
+		else
+			if farmConn then farmConn:Disconnect() farmConn = nil end
+			if farmM1Loop then task.cancel(farmM1Loop) farmM1Loop = nil end
+			if farmSkillLoop then task.cancel(farmSkillLoop) farmSkillLoop = nil end
+			farmTarget = nil
+			forcedLock = nil
+			if not ABOn and not tradeOn and not headRideOn then
+				stopHooks()
+			end
+		end
+	end,
+})
+
+FarmTab:CreateDropdown({
+	Name = "Position Mode",
+	Description = "Where to stand relative to the enemy",
+	Options = {"On Top", "Below", "Behind", "In Front"},
+	CurrentOption = "On Top",
+	Flag = "FR_Pos",
+	Callback = function(v) farmPosMode = v end,
+})
+
+FarmTab:CreateDropdown({
+	Name = "Skill Rotation",
+	Description = "Which skills to cycle through. Default 1->2->3->4",
+	Options = {"1,2,3,4", "1", "2", "3", "4"},
+	CurrentOption = "1,2,3,4",
+	Flag = "FR_Rotation",
+	Callback = function(v)
+		if v == "1,2,3,4" then
+			farmSkillRotation = {"1", "2", "3", "4"}
+		else
+			farmSkillRotation = {v}
+		end
+		farmRotationIndex = 1
+	end,
+})
+
+FarmTab:CreateToggle({
+	Name = "Team Check",
+	Description = "Skips teammates. Off = farms everyone (FFA)",
+	CurrentValue = true,
+	Flag = "FR_TeamCheck",
+	Callback = function(v) farmTeamCheck = v end,
+})
+
+FarmTab:CreateSlider({
+	Name = "Farm Range",
+	Description = "How far an enemy can be to farm",
+	Range = {5, 200},
+	Increment = 1,
+	CurrentValue = 30,
+	Flag = "FR_Range",
+	Callback = function(v) farmRange = v end,
+})
+
+FarmTab:CreateSlider({
+	Name = "M1 Spam Delay (s)",
+	Description = "How fast the M1s fire. Lower = faster combo spam",
+	Range = {0.02, 0.5},
+	Increment = 0.01,
+	Suffix = "s",
+	CurrentValue = 0.08,
+	Flag = "FR_M1Delay",
+	Callback = function(v) farmAttackDelay = v end,
+})
+
+FarmTab:CreateSlider({
+	Name = "Skill Spam Delay (s)",
+	Description = "How often the skill rotation advances",
+	Range = {0.1, 3},
+	Increment = 0.05,
+	Suffix = "s",
+	CurrentValue = 0.4,
+	Flag = "FR_SkillDelay",
+	Callback = function(v) farmSkillDelay = v end,
+})
+
+FarmTab:CreateSection("Manual Test")
+FarmTab:CreateButton({
+	Name = "Test Next Skill",
+	Description = "Fires the next key in the rotation once",
+	Callback = function()
+		fireNextFarmSkill()
+		Airflow:Notify("outlaw.dev", "Fired next skill", 2)
+	end,
+})
+
+FarmTab:CreateButton({
+	Name = "Test Farm M1",
+	Description = "Fires one M1 through Backpack.Input",
+	Callback = function()
+		fireM1()
+		Airflow:Notify("outlaw.dev", "M1 fired", 2)
+	end,
+})
+
+BlockTab:CreateSection("Auto Block")
+BlockTab:CreateToggle({
+	Name = "Auto Block",
+	Description = "Blocks the instant an enemy in range starts an attack animation",
+	CurrentValue = false,
+	Flag = "AB_On",
+	Callback = function(v)
+		ABOn = v
+		if v then startHooks() else if not tradeOn and not headRideOn and not farmOn then stopHooks() end end
+	end,
+})
+
+BlockTab:CreateToggle({
+	Name = "Hook Dummies",
+	Description = "Watches the dummies under workspace.Live",
+	CurrentValue = true,
+	Flag = "AB_HookDummies",
+	Callback = function(v)
+		hookDummies = v
+		if v and (ABOn or tradeOn or headRideOn or farmOn) then hookLive() end
+	end,
+})
+
+BlockTab:CreateToggle({
+	Name = "Hook Players",
+	Description = "Watches real players in the server",
+	CurrentValue = true,
+	Flag = "AB_HookPlayers",
+	Callback = function(v)
+		hookPlayers = v
+		if v and (ABOn or tradeOn or headRideOn or farmOn) then hookPlayersFunc() end
+	end,
+})
+
+BlockTab:CreateToggle({
+	Name = "Ping Compensation",
+	Description = "Extends the block hold so the server has time to register it",
+	CurrentValue = true,
+	Flag = "AB_PingComp",
+	Callback = function(v) pingComp = v end,
+})
+
+BlockTab:CreateSlider({
+	Name = "Ping Compensation (ms)",
+	Description = "Extra time added to the block hold to cover network delay",
+	Range = {0, 200},
+	Increment = 5,
+	Suffix = "ms",
+	CurrentValue = 50,
+	Flag = "AB_PingMs",
+	Callback = function(v) pingCompMs = v end,
+})
+
+BlockTab:CreateSlider({
+	Name = "Block Range",
+	Description = "How far an enemy can be and still be blocked",
+	Range = {0, 200},
+	Increment = 1,
+	CurrentValue = 25,
+	Flag = "AB_Range",
+	Callback = function(v) abRange = v end,
+})
+
+BlockTab:CreateSlider({
+	Name = "Block Hold Time",
+	Description = "How long the block stays up after it fires",
+	Range = {0.1, 2},
+	Increment = 0.01,
+	Suffix = "s",
+	CurrentValue = 0.20,
+	Flag = "AB_Hold",
+	Callback = function(v) abHold = v end,
+})
+
+BlockTab:CreateSection("Manual Test")
+BlockTab:CreateButton({
+	Name = "Test BlockOn",
+	Description = "Fires BlockOn once to check the remote",
+	Callback = function()
+		local i = getInput()
+		if not i then return Airflow:Notify("outlaw.dev", "Input not found", 3) end
+		pcall(function() i:FireServer("BlockOn") end)
+		Airflow:Notify("outlaw.dev", "BlockOn fired", 2)
+	end,
+})
+
+BlockTab:CreateButton({
+	Name = "Test BlockOff",
+	Description = "Fires BlockOff once to drop the block",
+	Callback = function()
+		local i = getInput()
+		if not i then return Airflow:Notify("outlaw.dev", "Input not found", 3) end
+		pcall(function() i:FireServer("BlockOff") end)
+		Airflow:Notify("outlaw.dev", "BlockOff fired", 2)
+	end,
+})
+
+BlockTab:CreateButton({
+	Name = "Test Full Pulse",
+	Description = "BlockOn then BlockOff after the hold time",
+	Callback = function()
+		local i = getInput()
+		if not i then return Airflow:Notify("outlaw.dev", "Input not found", 3) end
+		task.spawn(function()
+			pcall(function() i:FireServer("BlockOn") end)
+			task.wait(abHold)
+			pcall(function() i:FireServer("BlockOff") end)
+		end)
+		Airflow:Notify("outlaw.dev", "Pulse fired", 2)
+	end,
+})
+
+BlockTab:CreateSection("Diagnostics")
+BlockTab:CreateButton({
+	Name = "Check Status",
+	Description = "Shows if the remote was found and how many enemies are tracked",
+	Callback = function()
+		local bp = LP:FindFirstChild("Backpack")
+		local inp = bp and bp:FindFirstChild("Input")
+		local n = 0
+		for _ in pairs(hooked) do n = n + 1 end
+		local live = workspace:FindFirstChild("Live")
+		local lc = live and #live:GetChildren() or 0
+		local msg = (inp and "Input OK" or "Input missing") .. " | Hooked: " .. n .. " | Live: " .. lc
+		Airflow:Notify("outlaw.dev", msg, 5)
+	end,
+})
+
+TradeTab:CreateSection("M1 Trade")
+TradeTab:CreateToggle({
+	Name = "M1 Trade",
+	Description = "Blocks the incoming attack then fires one M1 after the block drops",
+	CurrentValue = false,
+	Flag = "MT_On",
+	Callback = function(v)
+		tradeOn = v
+		if v then startHooks() else if not ABOn and not headRideOn and not farmOn then stopHooks() end end
+	end,
+})
+
+TradeTab:CreateSlider({
+	Name = "Delay After Block",
+	Description = "Extra wait after the block drops before swinging",
+	Range = {0, 1},
+	Increment = 0.01,
+	Suffix = "s",
+	CurrentValue = 0.04,
+	Flag = "MT_Delay",
+	Callback = function(v) tradeDelay = v end,
+})
+
+TradeTab:CreateSection("Manual Test")
+TradeTab:CreateButton({
+	Name = "Test Fire M1",
+	Description = "Fires one remote M1 through Backpack.Input",
+	Callback = function()
+		if not getInput() then return Airflow:Notify("outlaw.dev", "Input not found", 3) end
+		fireM1()
+		Airflow:Notify("outlaw.dev", "M1 fired", 2)
+	end,
+})
+
+TradeTab:CreateButton({
+	Name = "Test Trade Now",
+	Description = "Runs the trade once without waiting for a real block",
+	Callback = function()
+		if trading then return Airflow:Notify("outlaw.dev", "Already trading", 2) end
+		tradedThisBlock = false
+		doTrade()
+		Airflow:Notify("outlaw.dev", "Trade triggered", 3)
+	end,
+})
+
+TradeTab:CreateButton({
+	Name = "Test Full Sequence (BlockOn -> BlockOff -> M1)",
+	Description = "Blocks, drops block, then fires one M1",
+	Callback = function()
+		local i = getInput()
+		if not i then return Airflow:Notify("outlaw.dev", "Input not found", 3) end
+		task.spawn(function()
+			pcall(function() i:FireServer("BlockOn") end)
+			task.wait(abHold + (pingComp and (pingCompMs / 1000) or 0))
+			pcall(function() i:FireServer("BlockOff") end)
+			task.wait(tradeDelay)
+			fireM1()
+		end)
+		Airflow:Notify("outlaw.dev", "Block -> off -> M1 fired", 3)
+	end,
+})
+
+TradeTab:CreateButton({
+	Name = "Force Reset Trade Lock",
+	Description = "Clears trading/tradedThisBlock if the trade got stuck",
+	Callback = function()
+		trading = false
+		tradedThisBlock = false
+		tradeStartTime = 0
+		Airflow:Notify("outlaw.dev", "Trade lock reset", 2)
+	end,
+})
+
+HeadRideTab:CreateSection("Head Ride")
+HeadRideTab:CreateToggle({
+	Name = "Auto Head Ride",
+	Description = "When your finisher actually HITS an enemy, glides above them and drops off after a moment",
+	CurrentValue = false,
+	Flag = "HR_On",
+	Callback = function(v)
+		headRideOn = v
+		if v then
+			startHooks()
+			hookMyAnimator()
+		else
+			stopHeadRide()
+			if myAnimConn then
+				pcall(function() myAnimConn:Disconnect() end)
+				myAnimConn = nil
+			end
+			if not ABOn and not tradeOn and not farmOn then
+				stopHooks()
+			end
+		end
+	end,
+})
+
+HeadRideTab:CreateSlider({
+	Name = "Head Offset",
+	Description = "How far above their head you sit",
+	Range = {-2, 10},
+	Increment = 0.1,
+	CurrentValue = 3,
+	Flag = "HR_Offset",
+	Callback = function(v) headRideOffset = v end,
+})
+
+HeadRideTab:CreateSlider({
+	Name = "Smoothness",
+	Description = "Lower = smoother glide, higher = snappier follow",
+	Range = {0.05, 1},
+	Increment = 0.05,
+	CurrentValue = 0.35,
+	Flag = "HR_Alpha",
+	Callback = function(v) headRideAlpha = v end,
+})
+
+HeadRideTab:CreateSlider({
+	Name = "Ride Duration (s)",
+	Description = "How long you stay on top before dropping off",
+	Range = {0.2, 5},
+	Increment = 0.1,
+	Suffix = "s",
+	CurrentValue = 1.5,
+	Flag = "HR_Duration",
+	Callback = function(v) headRideDuration = v end,
+})
+
+HeadRideTab:CreateSection("Manual Test")
+HeadRideTab:CreateButton({
+	Name = "Test Head Ride Nearest",
+	Description = "Glides above the nearest tracked enemy's head (no hit check)",
+	Callback = function()
+		local hum = next(hooked)
+		if not hum then
+			Airflow:Notify("outlaw.dev", "No tracked enemies", 3)
+			return
+		end
+		headRideOn = true
+		startHeadRide(hum)
+		Airflow:Notify("outlaw.dev", "Head ride on", 2)
+	end,
+})
+
+HeadRideTab:CreateButton({
+	Name = "Stop Head Ride",
+	Description = "Hops off the current target",
+	Callback = function()
+		stopHeadRide()
+		Airflow:Notify("outlaw.dev", "Head ride stopped", 2)
+	end,
+})
+
+NanamiTab:CreateSection("Auto Nanami")
+NanamiTab:CreateToggle({
+	Name = "Auto Nanami Black Flash",
+	Description = "Clicks the instant the Nanami cutter lines up with the goal",
+	CurrentValue = false,
+	Flag = "NA_On",
+	Callback = function(v)
+		nanamiOn = v
+		if v then
+			nanamiFired = false
+			bindNanamiChar(LP.Character)
+			if nanamiConn then nanamiConn:Disconnect() end
+			nanamiConn = RunService.PreRender:Connect(nanamiTick)
+		else
+			if nanamiConn then nanamiConn:Disconnect() nanamiConn = nil end
+		end
+	end,
+})
+
+NanamiTab:CreateInput({
+	Name = "Alignment Tolerance",
+	Description = "How close the cutter needs to be to the goal before clicking",
+	CurrentValue = "0.005",
+	PlaceholderText = "0.005",
+	Flag = "NA_Tol",
+	Callback = function(v)
+		local n = tonumber(v)
+		if n and n > 0 then nanamiTol = n end
+	end,
+})
+
+NanamiTab:CreateSection("Manual Test")
+NanamiTab:CreateButton({
+	Name = "Test Click",
+	Description = "Fires one virtual click to confirm it works",
+	Callback = function()
+		virtualClick()
+		Airflow:Notify("outlaw.dev", "Click fired", 2)
+	end,
+})
+
+NanamiTab:CreateButton({
+	Name = "Test Check Bar",
+	Description = "Shows the current cutter and goal positions if the bar is up",
+	Callback = function()
+		local cut, goal = findBar()
+		if not cut or not goal then return Airflow:Notify("outlaw.dev", "Bar not found", 3) end
+		local d = math.abs(cut.Position.X.Scale - goal.Position.X.Scale)
+		Airflow:Notify("outlaw.dev", string.format("Cutter %.4f | Goal %.4f | Diff %.4f",
+			cut.Position.X.Scale, goal.Position.X.Scale, d), 5)
+	end,
+})
+
+NanamiTab:CreateButton({
+	Name = "Reset Fired Latch",
+	Description = "Lets it fire again if it already hit once this aim",
+	Callback = function()
+		nanamiFired = false
+		Airflow:Notify("outlaw.dev", "Latch reset", 2)
+	end,
+})
+
+YujiTab:CreateSection("Auto Yuji")
+YujiTab:CreateToggle({
+	Name = "Auto Black Flash",
+	Description = "Fires your chosen attack on the FOV window and when you press 2",
+	CurrentValue = false,
+	Flag = "YU_On",
+	Callback = function(v)
+		yujiOn = v
+		if v then
+			fovChanged = false
+			fovFired = false
+			if yujiConn then yujiConn:Disconnect() end
+			yujiConn = RunService.RenderStepped:Connect(yujiTick)
+			hookYujiKey()
+		else
+			if yujiConn then yujiConn:Disconnect() yujiConn = nil end
+			if yujiKeyConn then
+				pcall(function() yujiKeyConn:Disconnect() end)
+				yujiKeyConn = nil
+			end
+		end
+	end,
+})
+
+YujiTab:CreateDropdown({
+	Name = "Attack Type",
+	Description = "Which attack to fire when the black flash window hits",
+	Options = {"Virtual Attack", "In-Game M1", "UseMove Remote"},
+	CurrentOption = "Virtual Attack",
+	Flag = "YU_Mode",
+	Callback = function(v)
+		yujiMode = v
+	end,
+})
+
+YujiTab:CreateSlider({
+	Name = "Key Delay (s)",
+	Description = "How long to wait after you press 2 before firing",
+	Range = {0, 2},
+	Increment = 0.05,
+	Suffix = "s",
+	CurrentValue = 0.6,
+	Flag = "YU_Delay",
+	Callback = function(v) yujiDelay = v end,
+})
+
+YujiTab:CreateInput({
+	Name = "FOV Threshold",
+	Description = "The FOV value the camera rises to when the black flash should fire",
+	CurrentValue = "43.3",
+	PlaceholderText = "43.3",
+	Flag = "YU_Threshold",
+	Callback = function(v)
+		local n = tonumber(v)
+		if n and n > 0 then fovThreshold = n end
+	end,
+})
+
+YujiTab:CreateInput({
+	Name = "FOV Enter",
+	Description = "Camera has to drop below this first before it counts as a black flash",
+	CurrentValue = "40",
+	PlaceholderText = "40",
+	Flag = "YU_Enter",
+	Callback = function(v)
+		local n = tonumber(v)
+		if n and n > 0 then fovEnter = n end
+	end,
+})
+
+YujiTab:CreateInput({
+	Name = "FOV Reset",
+	Description = "When the camera goes above this, the check resets for the next one",
+	CurrentValue = "50",
+	PlaceholderText = "50",
+	Flag = "YU_Reset",
+	Callback = function(v)
+		local n = tonumber(v)
+		if n and n > 0 then fovReset = n end
+	end,
+})
+
+YujiTab:CreateSection("Manual Test")
+YujiTab:CreateButton({
+	Name = "Test Fire (Current Mode)",
+	Description = "Fires whichever attack type you picked in the dropdown",
+	Callback = function()
+		fireSkillByMode()
+		Airflow:Notify("outlaw.dev", "Fired: " .. yujiMode, 2)
+	end,
+})
+
+YujiTab:CreateButton({
+	Name = "Check Current FOV",
+	Description = "Shows the current camera FOV and whether it is mid black flash",
+	Callback = function()
+		local cam = workspace.CurrentCamera
+		if not cam then return Airflow:Notify("outlaw.dev", "No camera", 3) end
+		Airflow:Notify("outlaw.dev", string.format("FOV %.2f | changed %s | fired %s | mode %s",
+			cam.FieldOfView, tostring(fovChanged), tostring(fovFired), yujiMode), 5)
+	end,
+})
+
+RecorderTab:CreateSection("Recorder")
+RecorderTab:CreateToggle({
+	Name = "Start Recording",
+	Description = "Logs every animation any humanoid plays",
+	CurrentValue = false,
+	Flag = "REC_On",
+	Callback = function(v)
+		if v then
+			recorderStart()
+			Airflow:Notify("outlaw.dev", "Recorder on", 2)
+		else
+			recorderStop()
+			Airflow:Notify("outlaw.dev", "Recorder off", 2)
+		end
+	end,
+})
+
+RecorderTab:CreateToggle({
+	Name = "Skip Movement Anims",
+	Description = "Ignores run/walk/idle/jump/fall/swim/climb so only attacks show up",
+	CurrentValue = true,
+	Flag = "REC_SkipMove",
+	Callback = function(v) recorderSkipMove = v end,
+})
+
+RecorderTab:CreateInput({
+	Name = "Add Custom Skip ID",
+	Description = "Paste an rbxassetid:// to always skip it (e.g. your run anim)",
+	CurrentValue = "",
+	PlaceholderText = "rbxassetid://...",
+	Flag = "REC_AddSkip",
+	Callback = function(v)
+		if v and v ~= "" then
+			recorderSkipIds[v] = true
+			Airflow:Notify("outlaw.dev", "Added to skip list", 2)
+		end
+	end,
+})
+
+RecorderTab:CreateSection("Preview Window")
+RecorderTab:CreateButton({
+	Name = "Show Preview Window",
+	Description = "Shows a small floating window in the corner that plays animations",
+	Callback = function()
+		if previewFrame then previewFrame.Visible = true end
+	end,
+})
+
+RecorderTab:CreateButton({
+	Name = "Hide Preview Window",
+	Description = "Hides the preview window",
+	Callback = function()
+		if previewFrame then previewFrame.Visible = false end
+	end,
+})
+
+RecorderTab:CreateButton({
+	Name = "Refresh Preview Rig",
+	Description = "Re-clones your character into the preview window (use after respawn)",
+	Callback = function()
+		if previewFrame then
+			pcall(function() previewFrame.Parent:Destroy() end)
+		end
+		setupPreviewRig()
+		Airflow:Notify("outlaw.dev", "Preview rig refreshed", 2)
+	end,
+})
+
+RecorderTab:CreateButton({
+	Name = "Preview Last Animation",
+	Description = "Plays the last recorded animation in the preview window",
+	Callback = function()
+		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
+		local last = recorderLog[#recorderLog]
+		previewAnim(last.id, last.model)
+		Airflow:Notify("outlaw.dev", "Previewing: " .. last.id, 2)
+	end,
+})
+
+RecorderTab:CreateSection("Copy")
+RecorderTab:CreateButton({
+	Name = "Copy Last Attack ID",
+	Description = "Copies just the last recorded animation ID",
+	Callback = function()
+		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
+		local last = recorderLog[#recorderLog]
+		copyText(last.id, "Copied: " .. last.id)
+	end,
+})
+
+RecorderTab:CreateButton({
+	Name = "Copy Just Unique IDs (atkIds format)",
+	Description = "Copies every unique animation ID as a Lua table, ready to paste into atkIds",
+	Callback = function()
+		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
+		copyText(recorderIdsOnly(), "Unique IDs copied")
+	end,
+})
+
+RecorderTab:CreateButton({
+	Name = "Copy Full Log (model -> id)",
+	Description = "Copies the full log with model names",
+	Callback = function()
+		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
+		copyText(recorderToText(), "Log copied")
+	end,
+})
+
+RecorderTab:CreateButton({
+	Name = "Clear Log",
+	Description = "Wipes everything recorded so far",
+	Callback = function()
+		table.clear(recorderLog)
+		Airflow:Notify("outlaw.dev", "Log cleared", 2)
+	end,
+})
+
+RecorderTab:CreateSection("Attack List")
+RecorderTab:CreateButton({
+	Name = "Add Last ID to Attack List",
+	Description = "Adds the most recent animation to atkIds so Auto Block watches it live",
+	Callback = function()
+		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
+		local last = recorderLog[#recorderLog]
+		atkIds[last.id] = true
+		Airflow:Notify("outlaw.dev", "Added: " .. last.id, 3)
+	end,
+})
+
+RecorderTab:CreateButton({
+	Name = "Print Current Attack List",
+	Description = "Prints every ID Auto Block is watching to F9",
+	Callback = function()
+		print("[AutoBlock] Watching IDs:")
+		for id in pairs(atkIds) do
+			print("  " .. id)
+		end
+		print("[HeadRide] My finisher ID:", headRideAnimId)
+		Airflow:Notify("outlaw.dev", "Printed to F9", 2)
+	end,
+})
+
+RecorderTab:CreateSection("Info")
+RecorderTab:CreateLabel("1. Start Recording")
+RecorderTab:CreateLabel("2. Let enemies swing at you")
+RecorderTab:CreateLabel("3. Preview Last to see it in the corner window")
+RecorderTab:CreateLabel("4. Copy Last Attack ID or Add to Attack List")
+
+PlayerTab:CreateSection("Movement")
+PlayerTab:CreateToggle({
+	Name = "Speedhack",
+	Description = "Makes you walk faster while moving",
+	CurrentValue = false,
+	Flag = "PL_Speed",
+	Callback = function(v)
+		speedOn = v
+		if speedConn then speedConn:Disconnect() speedConn = nil end
+		if not v then return end
+		speedConn = RunService.Heartbeat:Connect(function()
+			local c = LP.Character
+			if not c then return end
+			local hrp = c:FindFirstChild("HumanoidRootPart")
+			local h = c:FindFirstChildOfClass("Humanoid")
+			if not hrp or not h then return end
+			if flyOn then return end
+			if h.MoveDirection.Magnitude > 0 then
+				hrp.Velocity = h.MoveDirection.Unit * speedVal + Vector3.new(0, hrp.Velocity.Y, 0)
+			end
+		end)
+	end,
+})
+
+PlayerTab:CreateSlider({
+	Name = "Speed",
+	Description = "How fast the speedhack moves you",
+	Range = {16, 300},
+	Increment = 1,
+	CurrentValue = 64,
+	Flag = "PL_SpeedVal",
+	Callback = function(v) speedVal = v end,
+})
+
+PlayerTab:CreateToggle({
+	Name = "Flyhack",
+	Description = "Lets you fly around with WASD",
+	CurrentValue = false,
+	Flag = "PL_Fly",
+	Callback = function(v)
+		flyOn = v
+		if flyBV then pcall(function() flyBV:Destroy() end) flyBV = nil end
+		if flyConn then flyConn:Disconnect() flyConn = nil end
+		if not v then return end
+		local c = LP.Character
+		local hrp = c and c:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		local bv = Instance.new("BodyVelocity")
+		bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+		bv.Parent = hrp
+		flyBV = bv
+		flyConn = RunService.Heartbeat:Connect(function()
+			local ch = LP.Character
+			local h = ch and ch:FindFirstChildOfClass("Humanoid")
+			if not h or not bv.Parent then return end
+			local cam = workspace.CurrentCamera
+			bv.Velocity = cam.CFrame:VectorToWorldSpace(h.MoveDirection) * flyVal
+		end)
+	end,
+})
+
+PlayerTab:CreateSlider({
+	Name = "Fly Speed",
+	Description = "How fast you fly",
+	Range = {16, 500},
+	Increment = 1,
+	CurrentValue = 100,
+	Flag = "PL_FlyVal",
+	Callback = function(v) flyVal = v end,
+})
+
+PlayerTab:CreateToggle({
+	Name = "Infinite Jump",
+	Description = "You can jump as many times as you want while in the air",
+	CurrentValue = false,
+	Flag = "PL_Jump",
+	Callback = function(v)
+		infJumpOn = v
+		if infJumpConn then infJumpConn:Disconnect() infJumpConn = nil end
+		if not v then return end
+		infJumpConn = UserInputService.InputBegan:Connect(function(input, gp)
+			if gp then return end
+			if input.KeyCode ~= Enum.KeyCode.Space then return end
+			local c = LP.Character
+			local hrp = c and c:FindFirstChild("HumanoidRootPart")
+			if not hrp then return end
+			task.wait()
+			local bv = hrp:FindFirstChildWhichIsA("BodyVelocity") or Instance.new("BodyVelocity", hrp)
+			bv.Velocity = Vector3.new(0, infJumpPower, 0)
+			bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+			Debris:AddItem(bv, 0.2)
+		end)
+	end,
+})
+
+PlayerTab:CreateSlider({
+	Name = "Jump Power",
+	Description = "How hard the extra jump pushes you up",
+	Range = {10, 200},
+	Increment = 1,
+	CurrentValue = 50,
+	Flag = "PL_JumpPow",
+	Callback = function(v) infJumpPower = v end,
+})
+
+PlayerTab:CreateSection("Character Lock")
+PlayerTab:CreateToggle({
+	Name = "Character Lock",
+	Description = "Turns your body toward the closest enemy without touching your camera",
+	CurrentValue = false,
+	Flag = "PL_Lock",
+	Callback = function(v)
+		lockOn = v
+		if lockConn and not v and not farmOn then
+			lockConn:Disconnect()
+			lockConn = nil
+		end
+		if v and not lockConn then
+			lockConn = RunService.RenderStepped:Connect(lockTick)
+		end
+	end,
+})
+
+PlayerTab:CreateSlider({
+	Name = "Lock Range",
+	Description = "How far the enemy can be before the lock stops tracking them",
+	Range = {5, 200},
+	Increment = 1,
+	CurrentValue = 50,
+	Flag = "PL_LockRange",
+	Callback = function(v) lockRange = v end,
+})
+
+MiscTab:CreateSection("Server")
+MiscTab:CreateButton({
+	Name = "Rejoin",
+	Description = "Rejoins the same server",
+	Callback = function()
+		doRejoin()
+	end,
+})
+
+MiscTab:CreateButton({
+	Name = "Server Hop",
+	Description = "Jumps to a random different server",
+	Callback = function()
+		doServerHop()
+	end,
+})
+
+MiscTab:CreateButton({
+	Name = "Join Lowest Server",
+	Description = "Finds and joins the server with the fewest players",
+	Callback = function()
+		doJoinLowest()
+	end,
+})
+
+MiscTab:CreateToggle({
+	Name = "Auto Rejoin",
+	Description = "Automatically rejoins when you get kicked/disconnected",
+	CurrentValue = false,
+	Flag = "MS_AutoRejoin",
+	Callback = function(v)
+		autoRejoin = v
+		hookAutoRejoin()
+	end,
+})
+
+MiscTab:CreateSection("Info")
+MiscTab:CreateLabel("Server Hop picks any available server.")
+MiscTab:CreateLabel("Join Lowest picks the one with the fewest players.")
+MiscTab:CreateLabel("Auto Rejoin watches for teleport/disconnect and rejoins.")
+
+SettingsTab:CreateSection("Menu")
+SettingsTab:CreateButton({
+	Name = "Unload",
+	Description = "Closes the menu and stops everything",
+	Callback = function()
+		pcall(function() Airflow:Destroy() end)
+		if previewFrame then pcall(function() previewFrame.Parent:Destroy() end) end
+	end,
+})
+
+Airflow:Notify("outlaw.dev", "Loaded. Press RightControl to toggle menu.", 5)
